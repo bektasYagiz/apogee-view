@@ -27,7 +27,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { nedQuatToThree, OriginProjector } from "./coordinates";
 import { createRocket, REST_HEIGHT } from "./rocketMesh";
 import { FlightTrail } from "./flightTrail";
-import { TerrainMesh } from "./terrain";
+import { TerrainMesh, type TileFetcher } from "./terrain";
 import type { CameraMode, TelemetryFrame } from "./types";
 
 const BG_HEX = 0x05070a;
@@ -52,7 +52,7 @@ export class FlightScene {
   private readonly rocket = createRocket();
   private readonly projector = new OriginProjector();
   private readonly trail = new FlightTrail();
-  private readonly terrain = new TerrainMesh(BG_HEX, SUN_DIR);
+  private readonly terrain: TerrainMesh;
   private readonly scaleRing: LineLoop;
   private readonly scaleRingPositions = new Float32Array(SCALE_RING_SEGMENTS * 3);
   private readonly dropLine: Line;
@@ -69,7 +69,11 @@ export class FlightScene {
   private lastTime = 0;
   private disposed = false;
 
-  constructor(private readonly container: HTMLElement) {
+  constructor(
+    private readonly container: HTMLElement,
+    options: { tileFetcher?: TileFetcher } = {},
+  ) {
+    this.terrain = new TerrainMesh(BG_HEX, SUN_DIR, options.tileFetcher);
     this.renderer = new WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.toneMapping = ACESFilmicToneMapping;

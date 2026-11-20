@@ -11,8 +11,16 @@ const STEP = SIZE / SEGMENTS;
 const ZOOM = 13;
 const TILE_PX = 256;
 const MOSAIC_PX = TILE_PX * 3;
-const tileUrl = (x: number, y: number) =>
-  `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${ZOOM}/${x}/${y}.png`;
+
+export type TileFetcher = (z: number, x: number, y: number) => Promise<ArrayBuffer>;
+
+const fetchTileOverHttp =
+  (signal: AbortSignal): TileFetcher =>
+  async (z, x, y) => {
+    const res = await fetch(`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`, { signal });
+    if (!res.ok) throw new Error(`tile ${z}/${x}/${y}: ${res.status}`);
+    return res.arrayBuffer();
+  };
 
 // slippy-map Web Mercator tile coordinates (fractional) at ZOOM
 const TILES = 2 ** ZOOM;
@@ -34,11 +42,9 @@ function bilerp(grid: Float32Array, w: number, h: number, fx: number, fy: number
   return top * (1 - ty) + bot * ty;
 }
 
-async function fetchTileElevations(x: number, y: number, signal: AbortSignal): Promise<Float32Array> {
-  const res = await fetch(tileUrl(x, y), { signal });
-  if (!res.ok) throw new Error(`tile ${x}/${y}: ${res.status}`);
+async function fetchTileElevations(fetchTile: TileFetcher, x: number, y: number): Promise<Float32Array> {
   // no colour management: RGB channels are raw elevation bits, not colours
-  const bmp = await createImageBitmap(await res.blob(), {
+  const bmp = await createImageBitmap(new Blob([await fetchTile(ZOOM, x, y)], { type: "image/png" }), {
     colorSpaceConversion: "none",
     premultiplyAlpha: "none",
   });
@@ -57,7 +63,7 @@ async function fetchTileElevations(x: number, y: number, signal: AbortSignal): P
 }
 
 /** 3x3 tile mosaic centred on the tile holding (lat, lon); returns an elevation sampler. */
-async function fetchMosaic(lat: number, lon: number, signal: AbortSignal) {
+async function fetchMosaic(lat: number, lon: number, fetchTile: TileFetcher) {
   const tx0 = Math.floor(tileX(lon)) - 1;
   const ty0 = Math.floor(tileY(lat)) - 1;
   const mosaic = new Float32Array(MOSAIC_PX * MOSAIC_PX);
@@ -66,7 +72,7 @@ async function fetchMosaic(lat: number, lon: number, signal: AbortSignal) {
     for (let dx = 0; dx < 3; dx++) {
       const wrappedX = (((tx0 + dx) % TILES) + TILES) % TILES;
       jobs.push(
-        fetchTileElevations(wrappedX, ty0 + dy, signal).then((tile) => {
+        fetchTileElevations(fetchTile, wrappedX, ty0 + dy).then((tile) => {
           for (let r = 0; r < TILE_PX; r++) {
             mosaic.set(tile.subarray(r * TILE_PX, (r + 1) * TILE_PX), (dy * TILE_PX + r) * MOSAIC_PX + dx * TILE_PX);
           }
@@ -85,7 +91,11 @@ export class TerrainMesh {
   private readonly heights = new Float32Array(VERTS * VERTS);
   private abort: AbortController | null = null;
 
-  constructor(bgHex: number, sunDir: Vector3) {
+  constructor(
+    bgHex: number,
+    sunDir: Vector3,
+    private readonly tileFetcher?: TileFetcher,
+  ) {
     const geo = new PlaneGeometry(SIZE, SIZE, SEGMENTS, SEGMENTS);
     // plane rows run +Y..-Y; after this rotation vertex (ix, iz) lands at x = -HALF + ix*STEP, z = -HALF + iz*STEP
     geo.rotateX(-Math.PI / 2);
@@ -103,7 +113,7 @@ export class TerrainMesh {
     const ctrl = new AbortController();
     this.abort = ctrl;
     try {
-      const elevationAt = await fetchMosaic(lat0, lon0, ctrl.signal);
+      const elevationAt = await fetchMosaic(lat0, lon0, this.tileFetcher ?? fetchTileOverHttp(ctrl.signal));
       if (ctrl.signal.aborted) return false;
       const base = elevationAt(lat0, lon0);
       if (!Number.isFinite(base)) return false;

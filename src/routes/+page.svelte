@@ -20,12 +20,21 @@
   }
 
   onMount(() => {
-    const flight = new FlightScene(container);
+    const inTauri = "__TAURI_INTERNALS__" in window;
+    const flight = new FlightScene(container, {
+      tileFetcher: inTauri
+        ? async (z, x, y) => {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const bytes = await invoke<number[] | ArrayBuffer>("get_terrain_tile", { z, x, y });
+            return bytes instanceof ArrayBuffer ? bytes : new Uint8Array(bytes).buffer;
+          }
+        : undefined,
+    });
     scene = flight;
     let unlisten: (() => void) | undefined;
     let cancelled = false;
 
-    if ("__TAURI_INTERNALS__" in window) {
+    if (inTauri) {
       import("@tauri-apps/api/event")
         .then(({ listen }) =>
           listen<TelemetryFrame>("telemetry://frame", (e) => flight.pushFrame(e.payload)),

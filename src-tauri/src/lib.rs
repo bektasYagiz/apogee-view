@@ -1,5 +1,6 @@
 pub mod protocol;
 pub mod recorder;
+pub mod terrain;
 pub mod udp;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -20,7 +21,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             recorder::list_flight_logs,
-            recorder::load_flight_log
+            recorder::load_flight_log,
+            terrain::get_terrain_tile
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
