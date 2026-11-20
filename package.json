@@ -1,7 +1,7 @@
 {
-  "name": "tauri-app",
+  "name": "apogee-view",
   "version": "0.1.0",
-  "description": "",
+  "description": "Offline-first 3D flight telemetry visualizer for model rocketry and UAVs",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
