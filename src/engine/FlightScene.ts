@@ -8,10 +8,10 @@ import {
   DirectionalLight,
   BufferGeometry,
   DoubleSide,
-  GridHelper,
   HemisphereLight,
   Line,
   LineBasicMaterial,
+  LineLoop,
   Material,
   Mesh,
   MeshBasicMaterial,
@@ -27,7 +27,13 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { nedQuatToThree, OriginProjector } from "./coordinates";
 import { createRocket, REST_HEIGHT } from "./rocketMesh";
 import { FlightTrail } from "./flightTrail";
+import { TerrainMesh } from "./terrain";
 import type { CameraMode, TelemetryFrame } from "./types";
+
+const BG_HEX = 0x05070a;
+const SUN_DIR = new Vector3(30, 60, 20);
+const SCALE_RING_RADIUS = 50;
+const SCALE_RING_SEGMENTS = 128;
 
 const POS_RATE = 12;
 const ATT_RATE = 14;
@@ -38,11 +44,6 @@ const CG_LOOK_OFFSET = new Vector3(0, 0.8, 0);
 const ONBOARD_POS = new Vector3(0.1, 0, -0.3);
 const ONBOARD_LOOK = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), Math.PI);
 
-/** Terrain hook: swap in DEM sampling here. */
-export function getGroundHeight(_x: number, _z: number): number {
-  return 0;
-}
-
 export class FlightScene {
   private readonly renderer: WebGLRenderer;
   private readonly scene = new Scene();
@@ -51,6 +52,9 @@ export class FlightScene {
   private readonly rocket = createRocket();
   private readonly projector = new OriginProjector();
   private readonly trail = new FlightTrail();
+  private readonly terrain = new TerrainMesh(BG_HEX, SUN_DIR);
+  private readonly scaleRing: LineLoop;
+  private readonly scaleRingPositions = new Float32Array(SCALE_RING_SEGMENTS * 3);
   private readonly dropLine: Line;
   private readonly dropPositions = new Float32Array(6);
   private readonly nadir: Mesh;
@@ -72,7 +76,7 @@ export class FlightScene {
     this.renderer.domElement.style.display = "block";
     container.appendChild(this.renderer.domElement);
 
-    this.scene.background = new Color(0x080b10);
+    this.scene.background = new Color(BG_HEX);
     this.camera = new PerspectiveCamera(55, 1, 0.1, 20000);
     this.camera.position.set(4, 2.5, 5);
 
@@ -83,6 +87,15 @@ export class FlightScene {
     this.controls.maxDistance = 5000;
 
     this.buildEnvironment();
+
+    const ringGeo = new BufferGeometry();
+    ringGeo.setAttribute("position", new BufferAttribute(this.scaleRingPositions, 3));
+    this.scaleRing = new LineLoop(
+      ringGeo,
+      new LineBasicMaterial({ color: 0x64748b, transparent: true, opacity: 0.55 }),
+    );
+    this.conformScaleRing();
+    this.scene.add(this.terrain.mesh, this.scaleRing);
 
     const dropGeo = new BufferGeometry();
     dropGeo.setAttribute("position", new BufferAttribute(this.dropPositions, 3));
@@ -110,7 +123,13 @@ export class FlightScene {
   }
 
   pushFrame(frame: TelemetryFrame): void {
+    const wasLocked = this.projector.locked;
     const enu = this.projector.project(frame.lat, frame.lon, frame.alt);
+    if (!wasLocked && this.projector.locked) {
+      void this.terrain.loadAroundOrigin(frame.lat, frame.lon).then((ok) => {
+        if (ok && !this.disposed) this.conformScaleRing();
+      });
+    }
     if (!enu || !frame.quat.every(Number.isFinite)) return;
     this.targetPos.set(enu.x, enu.y + REST_HEIGHT, enu.z);
     this.targetQuat.copy(nedQuatToThree(frame.quat));
@@ -120,6 +139,12 @@ export class FlightScene {
   resetOrigin(): void {
     this.projector.resetOrigin();
     this.trail.clear();
+    this.terrain.reset();
+    this.conformScaleRing();
+  }
+
+  getGroundHeight(x: number, z: number): number {
+    return this.terrain.sampleHeight(x, z);
   }
 
   setCameraMode(mode: CameraMode): void {
@@ -144,6 +169,7 @@ export class FlightScene {
     this.resizeObserver.disconnect();
     this.controls.dispose();
     this.trail.dispose();
+    this.terrain.dispose();
     const materials = new Set<Material>();
     this.scene.traverse((obj) => {
       if (!(obj instanceof Mesh) && !("geometry" in obj)) return;
@@ -160,11 +186,8 @@ export class FlightScene {
 
   private buildEnvironment(): void {
     const sun = new DirectionalLight(0xfff2dd, 2.6);
-    sun.position.set(30, 60, 20);
+    sun.position.copy(SUN_DIR);
     this.scene.add(sun, new HemisphereLight(0x9bb8e0, 0x1a1d22, 0.9));
-
-    const grid = new GridHelper(400, 80, 0x2f3b4a, 0x1a222c);
-    this.scene.add(grid);
 
     const padMat = new MeshStandardMaterial({ color: 0x3a3f46, roughness: 0.9 });
     const pad = new Mesh(new CylinderGeometry(2, 2, 0.05, 48), padMat);
@@ -188,9 +211,22 @@ export class FlightScene {
     this.scene.add(north, east);
   }
 
+  /** Drapes the 50 m scale ring over the current terrain heightfield. */
+  private conformScaleRing(): void {
+    for (let i = 0; i < SCALE_RING_SEGMENTS; i++) {
+      const a = (i / SCALE_RING_SEGMENTS) * Math.PI * 2;
+      const x = Math.cos(a) * SCALE_RING_RADIUS;
+      const z = Math.sin(a) * SCALE_RING_RADIUS;
+      this.scaleRingPositions.set([x, this.getGroundHeight(x, z) + 0.15, z], i * 3);
+    }
+    const geo = this.scaleRing.geometry;
+    geo.attributes.position.needsUpdate = true;
+    geo.computeBoundingSphere();
+  }
+
   private updateDropLine(): void {
     const { x, y, z } = this.rocket.position;
-    const ground = getGroundHeight(x, z);
+    const ground = this.getGroundHeight(x, z);
     this.dropPositions.set([x, y, z, x, ground, z]);
     this.dropLine.geometry.attributes.position.needsUpdate = true;
     this.nadir.position.set(x, ground + 0.02, z);

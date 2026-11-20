@@ -37,12 +37,19 @@ export class OriginProjector {
 
   private lock(lat: number, lon: number, alt: number): void {
     this.origin = { lat, lon, alt };
-    const phi = lat * DEG;
-    const w = Math.sqrt(1 - WGS84_E2 * Math.sin(phi) ** 2);
-    // meridian radius for northing, prime-vertical radius * cos(lat) for easting
-    this.mPerDegLat = ((WGS84_A * (1 - WGS84_E2)) / w ** 3) * DEG;
-    this.mPerDegLon = (WGS84_A / w) * Math.cos(phi) * DEG;
+    ({ lat: this.mPerDegLat, lon: this.mPerDegLon } = metersPerDegree(lat));
   }
+}
+
+/** Local tangent-plane scale factors at a reference latitude. */
+export function metersPerDegree(lat: number): { lat: number; lon: number } {
+  const phi = lat * DEG;
+  const w = Math.sqrt(1 - WGS84_E2 * Math.sin(phi) ** 2);
+  // meridian radius for northing, prime-vertical radius * cos(lat) for easting
+  return {
+    lat: ((WGS84_A * (1 - WGS84_E2)) / w ** 3) * DEG,
+    lon: (WGS84_A / w) * Math.cos(phi) * DEG,
+  };
 }
 
 export function nedQuatToThree(q: readonly [number, number, number, number]): Quaternion {
