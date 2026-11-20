@@ -1,13 +1,14 @@
 use crate::protocol::{TelemetryFrame, parse_packet};
 use tauri::{AppHandle, Emitter};
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 
 pub const BIND_ADDR: &str = "127.0.0.1:5005";
 pub const FRAME_EVENT: &str = "telemetry://frame";
 const MAX_DATAGRAM: usize = 2048;
 const DROP_LOG_EVERY: u64 = 100;
 
-pub async fn listen(app: AppHandle) {
+pub async fn listen(app: AppHandle, recorder: mpsc::Sender<TelemetryFrame>) {
     let socket = match UdpSocket::bind(BIND_ADDR).await {
         Ok(s) => s,
         Err(e) => {
@@ -21,6 +22,8 @@ pub async fn listen(app: AppHandle) {
         if let Err(e) = app.emit(FRAME_EVENT, &frame) {
             eprintln!("udp: frame emit failed: {e}");
         }
+        // Full queue means the disk is stalled; losing log frames beats stalling the radio.
+        let _ = recorder.try_send(frame);
     })
     .await;
 }
@@ -52,7 +55,6 @@ async fn recv_loop(socket: UdpSocket, mut on_frame: impl FnMut(TelemetryFrame)) 
 mod tests {
     use super::*;
     use std::time::Duration;
-    use tokio::sync::mpsc;
     use tokio::time::timeout;
 
     #[tokio::test]
