@@ -1,3 +1,5 @@
+export type CameraMode = "chase" | "pad" | "onboard" | "topdown";
+
 export interface TelemetryFrame {
   ts: number;
   quat: [number, number, number, number];

@@ -1,17 +1,24 @@
 import {
   ACESFilmicToneMapping,
+  BufferAttribute,
   BoxGeometry,
   CircleGeometry,
   Color,
   CylinderGeometry,
   DirectionalLight,
+  BufferGeometry,
+  DoubleSide,
   GridHelper,
   HemisphereLight,
+  Line,
+  LineBasicMaterial,
   Material,
   Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
   PerspectiveCamera,
   Quaternion,
+  RingGeometry,
   Scene,
   Vector3,
   WebGLRenderer,
@@ -19,10 +26,22 @@ import {
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { nedQuatToThree, OriginProjector } from "./coordinates";
 import { createRocket, REST_HEIGHT } from "./rocketMesh";
-import type { TelemetryFrame } from "./types";
+import { FlightTrail } from "./flightTrail";
+import type { CameraMode, TelemetryFrame } from "./types";
 
 const POS_RATE = 12;
 const ATT_RATE = 14;
+const PAD_CAM_POS = new Vector3(12, 3, 12);
+const TOPDOWN_HEIGHT = 60;
+const CG_LOOK_OFFSET = new Vector3(0, 0.8, 0);
+// body-mounted camera: just off the airframe, forward of mid, looking aft along the fins
+const ONBOARD_POS = new Vector3(0.1, 0, -0.3);
+const ONBOARD_LOOK = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), Math.PI);
+
+/** Terrain hook: swap in DEM sampling here. */
+export function getGroundHeight(_x: number, _z: number): number {
+  return 0;
+}
 
 export class FlightScene {
   private readonly renderer: WebGLRenderer;
@@ -31,6 +50,13 @@ export class FlightScene {
   private readonly controls: OrbitControls;
   private readonly rocket = createRocket();
   private readonly projector = new OriginProjector();
+  private readonly trail = new FlightTrail();
+  private readonly dropLine: Line;
+  private readonly dropPositions = new Float32Array(6);
+  private readonly nadir: Mesh;
+  private readonly chaseOffset = new Vector3(4, 1.7, 5);
+  private readonly tmpVec = new Vector3();
+  private mode: CameraMode = "chase";
   private readonly resizeObserver: ResizeObserver;
   private readonly targetPos = new Vector3(0, REST_HEIGHT, 0);
   // vertical nose-up on the pad until the first frame arrives
@@ -57,6 +83,21 @@ export class FlightScene {
     this.controls.maxDistance = 5000;
 
     this.buildEnvironment();
+
+    const dropGeo = new BufferGeometry();
+    dropGeo.setAttribute("position", new BufferAttribute(this.dropPositions, 3));
+    this.dropLine = new Line(
+      dropGeo,
+      new LineBasicMaterial({ color: 0x94a3b8, transparent: true, opacity: 0.45 }),
+    );
+    this.dropLine.frustumCulled = false;
+    this.nadir = new Mesh(
+      new RingGeometry(0.25, 0.32, 32),
+      new MeshBasicMaterial({ color: 0x94a3b8, transparent: true, opacity: 0.7, side: DoubleSide }),
+    );
+    this.nadir.rotation.x = -Math.PI / 2;
+    this.scene.add(this.trail.object, this.dropLine, this.nadir);
+
     this.rocket.position.copy(this.targetPos);
     this.rocket.quaternion.copy(this.targetQuat);
     this.scene.add(this.rocket);
@@ -73,10 +114,27 @@ export class FlightScene {
     if (!enu || !frame.quat.every(Number.isFinite)) return;
     this.targetPos.set(enu.x, enu.y + REST_HEIGHT, enu.z);
     this.targetQuat.copy(nedQuatToThree(frame.quat));
+    this.trail.push(this.targetPos, frame.state);
   }
 
   resetOrigin(): void {
     this.projector.resetOrigin();
+    this.trail.clear();
+  }
+
+  setCameraMode(mode: CameraMode): void {
+    if (mode === this.mode) return;
+    if (this.mode === "chase") {
+      this.chaseOffset.copy(this.camera.position).sub(this.controls.target);
+    }
+    this.mode = mode;
+    this.camera.up.set(0, 1, 0);
+    this.controls.enabled = mode === "chase";
+    if (mode === "chase") {
+      this.controls.target.copy(this.rocket.position).add(CG_LOOK_OFFSET);
+      this.camera.position.copy(this.controls.target).add(this.chaseOffset);
+      this.controls.update();
+    }
   }
 
   dispose(): void {
@@ -85,6 +143,7 @@ export class FlightScene {
     cancelAnimationFrame(this.rafId);
     this.resizeObserver.disconnect();
     this.controls.dispose();
+    this.trail.dispose();
     const materials = new Set<Material>();
     this.scene.traverse((obj) => {
       if (!(obj instanceof Mesh) && !("geometry" in obj)) return;
@@ -129,6 +188,41 @@ export class FlightScene {
     this.scene.add(north, east);
   }
 
+  private updateDropLine(): void {
+    const { x, y, z } = this.rocket.position;
+    const ground = getGroundHeight(x, z);
+    this.dropPositions.set([x, y, z, x, ground, z]);
+    this.dropLine.geometry.attributes.position.needsUpdate = true;
+    this.nadir.position.set(x, ground + 0.02, z);
+  }
+
+  private updateCamera(): void {
+    const p = this.rocket.position;
+    switch (this.mode) {
+      case "chase": {
+        // keep the orbit offset while the target follows the airframe
+        const follow = this.tmpVec.copy(p).add(CG_LOOK_OFFSET).sub(this.controls.target);
+        this.camera.position.add(follow);
+        this.controls.target.add(follow);
+        this.controls.update();
+        break;
+      }
+      case "pad":
+        this.camera.position.copy(PAD_CAM_POS);
+        this.camera.lookAt(p);
+        break;
+      case "onboard":
+        this.camera.position.copy(ONBOARD_POS).applyQuaternion(this.rocket.quaternion).add(p);
+        this.camera.quaternion.copy(this.rocket.quaternion).multiply(ONBOARD_LOOK);
+        break;
+      case "topdown":
+        this.camera.up.set(0, 0, -1);
+        this.camera.position.set(p.x, p.y + TOPDOWN_HEIGHT, p.z);
+        this.camera.lookAt(p);
+        break;
+    }
+  }
+
   private resize(): void {
     const w = Math.max(1, this.container.clientWidth);
     const h = Math.max(1, this.container.clientHeight);
@@ -147,11 +241,8 @@ export class FlightScene {
     this.rocket.position.lerp(this.targetPos, 1 - Math.exp(-POS_RATE * dt));
     this.rocket.quaternion.slerp(this.targetQuat, 1 - Math.exp(-ATT_RATE * dt));
 
-    // keep the orbit offset while the target follows the airframe
-    const follow = this.rocket.position.clone().add(new Vector3(0, 0.8, 0)).sub(this.controls.target);
-    this.camera.position.add(follow);
-    this.controls.target.add(follow);
-    this.controls.update();
+    this.updateDropLine();
+    this.updateCamera();
 
     this.renderer.render(this.scene, this.camera);
     this.rafId = requestAnimationFrame(this.tick);
