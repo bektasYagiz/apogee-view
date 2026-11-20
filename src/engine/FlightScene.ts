@@ -147,6 +147,11 @@ export class FlightScene {
     this.conformScaleRing();
   }
 
+  /** Drops trail history but keeps the locked origin and terrain; used when rewinding a replay. */
+  clearTrail(): void {
+    this.trail.clear();
+  }
+
   getGroundHeight(x: number, z: number): number {
     return this.terrain.sampleHeight(x, z);
   }
