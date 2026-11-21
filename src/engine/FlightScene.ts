@@ -37,7 +37,10 @@ const SCALE_RING_SEGMENTS = 128;
 
 const POS_RATE = 12;
 const ATT_RATE = 14;
-const PAD_CAM_POS = new Vector3(12, 3, 12);
+// CG height above the surface when the airframe lies on its side (body radius plus a little)
+const LYING_CLEARANCE = 0.08;
+const NOSE_AXIS = new Vector3(0, 0, -1);
+const PAD_CAM_POS =new Vector3(12, 3, 12);
 const TOPDOWN_HEIGHT = 60;
 const CG_LOOK_OFFSET = new Vector3(0, 0.8, 0);
 // body-mounted camera: just off the airframe, forward of mid, looking aft along the fins
@@ -138,8 +141,12 @@ export class FlightScene {
       });
     }
     if (!enu || !frame.quat.every(Number.isFinite)) return;
-    this.targetPos.set(enu.x, enu.y + REST_HEIGHT, enu.z);
     this.targetQuat.copy(nedQuatToThree(frame.quat));
+    // the mesh's nose axis sits on -Z (not local +Y), so its world-y component is how upright the airframe is
+    const upright = Math.abs(this.tmpVec.copy(NOSE_AXIS).applyQuaternion(this.targetQuat).y);
+    const clearance = LYING_CLEARANCE + (REST_HEIGHT - LYING_CLEARANCE) * upright;
+    const groundY = this.getGroundHeight(enu.x, enu.z);
+    this.targetPos.set(enu.x, Math.max(enu.y + clearance, groundY + clearance), enu.z);
     this.phase = frame.state;
     // History after a reset or rewind arrives as a burst the damped rocket can't trace, so it goes straight in.
     if (this.rebuilding) this.trail.push(this.targetPos, frame.state);
