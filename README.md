@@ -55,3 +55,10 @@ Logs are written to the app data directory under `flights/`, one `.jsonl` file p
 ## Status
 
 Early prototype. Tested with the simulated flight so far, not yet with real hardware.
+
+## Known limitations
+
+- **Offline DEM cache:** Terrarium elevation tiles are cached on disk after the first fetch. To fly at a field with no internet, open the launch site area once beforehand while connected so its tiles get cached.
+- **Binary protocol phases:** The 42-byte binary packet (`<2sI4fddf`) carries attitude and GNSS position but no flight-state byte. Binary streams are classified kinematically into `IDLE` and `FLIGHT` only; the full 7-phase state needs JSON packets.
+- **UDP loopback only:** Ingestion listens on `127.0.0.1:5005` over UDP and nothing else. Radio or serial ground-station links need an external forwarder script for now.
+- **Local tangent plane:** WGS84-to-ENU projection uses local meridian and prime-vertical radii around the launch origin. Accurate at sub-orbital and regional ranges, not meant for long-range or orbital trajectories.
