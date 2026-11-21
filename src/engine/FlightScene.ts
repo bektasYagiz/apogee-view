@@ -173,6 +173,14 @@ export class FlightScene {
     this.restartTrail();
   }
 
+  /**
+   * Marks a timeline jump that keeps the trail: frames fed next go straight into it, and the
+   * rocket snaps to the last one instead of damping across the gap (which would draw a chord).
+   */
+  snapToTarget(): void {
+    this.rebuilding = true;
+  }
+
   private restartTrail(): void {
     this.trail.clear();
     this.trailArmed = false;

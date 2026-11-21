@@ -63,10 +63,12 @@
     stats.reset();
   }
 
-  function onReplayFrames(frames: TelemetryFrame[], rewind: boolean) {
+  function onReplayFrames(frames: TelemetryFrame[], rewind: boolean, seek: boolean) {
     if (rewind) {
       scene?.clearTrail();
       stats.reset();
+    } else if (seek) {
+      scene?.snapToTarget();
     }
     feed(frames);
   }

@@ -3,8 +3,11 @@
   import type { TelemetryFrame } from "../../engine/types";
 
   interface Props {
-    /** Feeds frames to the scene; `rewind` means clear history first (frames start at index 0). */
-    onFrames: (frames: TelemetryFrame[], rewind: boolean) => void;
+    /**
+     * Feeds frames to the scene; `rewind` means clear history first (frames start at index 0),
+     * `seek` marks a jump (scrub or open) as opposed to ordinary playback stepping.
+     */
+    onFrames: (frames: TelemetryFrame[], rewind: boolean, seek: boolean) => void;
     /** A log was opened: pause live forwarding and reset origin/stats. */
     onEnter: () => void;
     /** Back to live: reset origin/stats and resume forwarding. */
@@ -67,7 +70,7 @@
       onEnter();
       index = 0;
       playhead = 0;
-      onFrames([loaded[0]], true);
+      onFrames([loaded[0]], true, true);
       play();
     } catch (e) {
       error = String(e);
@@ -84,8 +87,8 @@
   function seek(target: number) {
     const i = Math.max(0, Math.min(frames.length - 1, Math.round(target)));
     if (i === index) return;
-    if (i < index) onFrames(frames.slice(0, i + 1), true);
-    else onFrames(frames.slice(index + 1, i + 1), false);
+    if (i < index) onFrames(frames.slice(0, i + 1), true, true);
+    else onFrames(frames.slice(index + 1, i + 1), false, true);
     index = i;
     playhead = times[i];
   }
@@ -96,7 +99,7 @@
     let next = index;
     while (next + 1 < frames.length && times[next + 1] <= playhead) next++;
     if (next !== index) {
-      onFrames(frames.slice(index + 1, next + 1), false);
+      onFrames(frames.slice(index + 1, next + 1), false, false);
       index = next;
     }
     if (index >= frames.length - 1) {
