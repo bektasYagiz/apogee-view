@@ -190,15 +190,23 @@ mod tests {
     }
 
     fn binary_packet(quat: [f32; 4]) -> Vec<u8> {
+        binary_with(quat, 39.9334, 32.8597, 850.5)
+    }
+
+    fn binary_with(quat: [f32; 4], lat: f64, lon: f64, alt: f32) -> Vec<u8> {
         let mut v = BINARY_HEADER.to_vec();
         v.extend_from_slice(&1234u32.to_le_bytes());
         for q in quat {
             v.extend_from_slice(&q.to_le_bytes());
         }
-        v.extend_from_slice(&39.9334f64.to_le_bytes());
-        v.extend_from_slice(&32.8597f64.to_le_bytes());
-        v.extend_from_slice(&850.5f32.to_le_bytes());
+        v.extend_from_slice(&lat.to_le_bytes());
+        v.extend_from_slice(&lon.to_le_bytes());
+        v.extend_from_slice(&alt.to_le_bytes());
         v
+    }
+
+    fn unit_norm(q: [f32; 4]) -> f32 {
+        q.iter().map(|x| x * x).sum::<f32>().sqrt()
     }
 
     #[test]
@@ -272,5 +280,126 @@ mod tests {
             parse_packet(&binary_packet([0.0; 4])),
             Err(ProtocolError::ZeroQuaternion)
         );
+    }
+
+    #[test]
+    fn malformed_binary_never_panics() {
+        let good = binary_packet([1.0, 0.0, 0.0, 0.0]);
+
+        let mut bad_magic = good.clone();
+        bad_magic[1] = 0x56;
+        assert_eq!(parse_packet(&bad_magic), Err(ProtocolError::UnknownHeader(0xAA)));
+        assert_eq!(parse_packet(&[0xAA]), Err(ProtocolError::UnknownHeader(0xAA)));
+        assert_eq!(parse_packet(&[0x55, 0xAA]), Err(ProtocolError::UnknownHeader(0x55)));
+
+        let mut long = good.clone();
+        long.push(0);
+        assert!(matches!(
+            parse_packet(&long),
+            Err(ProtocolError::BadLength { expected: 42, got: 43 })
+        ));
+
+        // header-only up to one byte short: every truncation is a clean error
+        for n in 2..BINARY_LEN {
+            assert!(
+                matches!(parse_packet(&good[..n]), Err(ProtocolError::BadLength { .. })),
+                "len {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_json_never_panics() {
+        let good = br#"{"ts":1,"quat":[1,0,0,0],"gps":{"lat":0,"lon":0,"alt":1.0}}"#;
+        assert!(parse_packet(good).is_ok());
+
+        // a strict prefix of a JSON object is never valid
+        for n in 1..good.len() {
+            assert!(matches!(parse_packet(&good[..n]), Err(ProtocolError::BadJson(_))), "len {n}");
+        }
+
+        for bad in [
+            &br#"{"ts":1,"quat":[1,0,0,0]}"#[..],
+            br#"{"ts":"x","quat":[1,0,0,0],"gps":{"lat":0,"lon":0,"alt":0}}"#,
+            br#"{"ts":-1,"quat":[1,0,0,0],"gps":{"lat":0,"lon":0,"alt":0}}"#,
+            br#"{"ts":1,"quat":[1,0,0],"gps":{"lat":0,"lon":0,"alt":0}}"#,
+            br#"{"ts":1,"quat":[1,0,0,0],"gps":{"lat":null,"lon":0,"alt":0}}"#,
+            br#"{"ts":1,"quat":[NaN,0,0,0],"gps":{"lat":0,"lon":0,"alt":0}}"#,
+            b"{}",
+            &[0x7B, 0xFF, 0xFE],
+        ] {
+            assert!(matches!(parse_packet(bad), Err(ProtocolError::BadJson(_))));
+        }
+    }
+
+    #[test]
+    fn binary_non_finite_fields_are_rejected() {
+        let id = [1.0, 0.0, 0.0, 0.0];
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for i in 0..4 {
+                let mut q = id;
+                q[i] = bad;
+                assert_eq!(parse_packet(&binary_with(q, 1.0, 1.0, 1.0)), Err(ProtocolError::NonFinite("quat")));
+            }
+            assert_eq!(parse_packet(&binary_with(id, 1.0, 1.0, bad)), Err(ProtocolError::NonFinite("alt")));
+        }
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(parse_packet(&binary_with(id, bad, 1.0, 1.0)), Err(ProtocolError::NonFinite("position")));
+            assert_eq!(parse_packet(&binary_with(id, 1.0, bad, 1.0)), Err(ProtocolError::NonFinite("position")));
+        }
+    }
+
+    #[test]
+    fn json_overflowing_numbers_are_rejected() {
+        // 1e39 fits f64 but overflows f32 to infinity
+        for raw in [
+            &br#"{"ts":1,"quat":[1e39,0,0,0],"gps":{"lat":0,"lon":0,"alt":0}}"#[..],
+            br#"{"ts":1,"quat":[1,0,0,0],"gps":{"lat":0,"lon":0,"alt":1e39}}"#,
+            br#"{"ts":1,"quat":[1,0,0,0],"gps":{"lat":0,"lon":0,"alt":0},"baro_alt":-1e39}"#,
+            br#"{"ts":1,"euler":[0,1e39,0],"gps":{"lat":0,"lon":0,"alt":0}}"#,
+            br#"{"ts":1,"quat":[1,0,0,0],"gps":{"lat":1e999,"lon":0,"alt":0}}"#,
+        ] {
+            assert!(parse_packet(raw).is_err(), "{}", String::from_utf8_lossy(raw));
+        }
+    }
+
+    #[test]
+    fn gimbal_lock_pitch_90_is_unit_and_exact() {
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        // at +90 pitch roll and yaw collapse to one angle, (roll - yaw); expect w=y=h*cos(d/2), x=-z=h*sin(d/2)
+        for (roll, yaw) in [(0.0, 0.0), (30.0, 0.0), (0.0, 30.0), (45.0, 45.0), (170.0, -20.0)] {
+            let q = euler_to_quat([roll, 90.0, yaw]);
+            let half = (roll - yaw as f32).to_radians() * 0.5;
+            assert!(q.iter().all(|v| v.is_finite()));
+            assert!((unit_norm(q) - 1.0).abs() < EPS, "norm {}", unit_norm(q));
+            assert!(close(q, [h * half.cos(), h * half.sin(), h * half.cos(), -h * half.sin()]), "{q:?}");
+        }
+        assert!(close(euler_to_quat([0.0, 90.0, 0.0]), [h, 0.0, h, 0.0]));
+    }
+
+    #[test]
+    fn gimbal_lock_pitch_minus_90_is_unit_and_exact() {
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        // at -90 pitch the surviving angle is (roll + yaw); expect w=-y=h*cos(s/2), x=z=h*sin(s/2)
+        for (roll, yaw) in [(0.0, 0.0), (30.0, 0.0), (0.0, 30.0), (45.0, 45.0), (170.0, -20.0)] {
+            let q = euler_to_quat([roll, -90.0, yaw]);
+            let half = (roll + yaw as f32).to_radians() * 0.5;
+            assert!(q.iter().all(|v| v.is_finite()));
+            assert!((unit_norm(q) - 1.0).abs() < EPS, "norm {}", unit_norm(q));
+            assert!(close(q, [h * half.cos(), h * half.sin(), -h * half.cos(), h * half.sin()]), "{q:?}");
+        }
+        assert!(close(euler_to_quat([0.0, -90.0, 0.0]), [h, 0.0, -h, 0.0]));
+    }
+
+    #[test]
+    fn gimbal_lock_through_json_stays_finite_and_normalized() {
+        for pitch in ["90.0", "-90.0", "90.000001", "-90.000001"] {
+            let raw = format!(
+                r#"{{"ts":1,"euler":[10.0,{pitch},20.0],"gps":{{"lat":0,"lon":0,"alt":0}}}}"#
+            );
+            let q = parse_packet(raw.as_bytes()).unwrap().quat;
+            assert!(q.iter().all(|v| v.is_finite()), "{pitch}: {q:?}");
+            assert!((unit_norm(q) - 1.0).abs() < EPS, "{pitch}");
+        }
     }
 }
