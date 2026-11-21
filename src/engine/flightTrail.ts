@@ -19,6 +19,9 @@ const PHASE_COLORS: Record<string, number> = {
   APOGEE: 0xd946ef,
   DROGUE: 0x10b981,
   MAIN: 0x38bdf8,
+  // inferred phases for streams that carry no state
+  IDLE: 0x64748b,
+  FLIGHT: 0xa3e635,
 };
 const FALLBACK_COLOR = 0x14b8a6;
 

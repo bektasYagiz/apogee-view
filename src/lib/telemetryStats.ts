@@ -9,12 +9,21 @@ export const PHASE_CSS: Record<string, string> = {
   APOGEE: "#d946ef",
   DROGUE: "#10b981",
   MAIN: "#38bdf8",
+  IDLE: "#64748b",
+  FLIGHT: "#a3e635",
 };
 export const PHASE_FALLBACK_CSS = "#14b8a6";
 
 const RAD = 180 / Math.PI;
 const RATE_WINDOW_MS = 1000;
 const SMOOTH = 0.35;
+
+// Binary packets carry no state byte, so phase is inferred from kinematics when state is UNKNOWN.
+const GROUND_AGL = 2.0;
+const LIFTOFF_VSPEED = 1.5;
+const LANDED_VSPEED = 0.5;
+const LANDED_HOLD_MS = 1000;
+type InferredPhase = "IDLE" | "FLIGHT";
 // frame `ts` is the flight computer's millisecond counter
 const TS_PER_SECOND = 1000;
 
@@ -52,8 +61,14 @@ export class TelemetryStats {
   private last: TelemetryFrame | null = null;
   private arrivals: number[] = [];
 
-  /** Call once per frame, in order; `now` is wall-clock ms used for the packet rate only. */
-  update(frame: TelemetryFrame, now: number): void {
+  private phase: InferredPhase = "IDLE";
+  private settledSince: number | null = null;
+
+  /**
+   * Call once per frame, in order; `now` is wall-clock ms used for the packet rate only.
+   * Returns the frame with an inferred phase swapped in when the sender gave none (state UNKNOWN).
+   */
+  update(frame: TelemetryFrame, now: number): TelemetryFrame {
     this.originAlt ??= frame.alt;
     const agl = frame.alt - this.originAlt;
     if (agl > this.apogee) this.apogee = agl;
@@ -68,14 +83,36 @@ export class TelemetryStats {
       this.speed += SMOOTH * (Math.hypot(dN, dE, dU) / dt - this.speed);
       this.vSpeed += SMOOTH * (dU / dt - this.vSpeed);
     }
+    this.advancePhase(frame.ts, agl);
+    const resolved = frame.state === "UNKNOWN" ? { ...frame, state: this.phase } : frame;
     this.prev = frame;
-    this.last = frame;
+    this.last = resolved;
 
     this.arrivals.push(now);
     while (this.arrivals.length && now - this.arrivals[0] > RATE_WINDOW_MS) this.arrivals.shift();
+    return resolved;
+  }
+
+  private advancePhase(ts: number, agl: number): void {
+    const v = Math.abs(this.vSpeed);
+    if (this.phase === "IDLE") {
+      if (agl > GROUND_AGL || v >= LIFTOFF_VSPEED) this.phase = "FLIGHT";
+      return;
+    }
+    if (agl >= GROUND_AGL || v >= LANDED_VSPEED) {
+      this.settledSince = null;
+      return;
+    }
+    this.settledSince ??= ts;
+    if (ts - this.settledSince >= LANDED_HOLD_MS) {
+      this.phase = "IDLE";
+      this.settledSince = null;
+    }
   }
 
   reset(): void {
+    this.phase = "IDLE";
+    this.settledSince = null;
     this.originAlt = null;
     this.apogee = 0;
     this.speed = 0;
