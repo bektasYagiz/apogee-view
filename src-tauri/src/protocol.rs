@@ -369,7 +369,7 @@ mod tests {
         // at +90 pitch roll and yaw collapse to one angle, (roll - yaw); expect w=y=h*cos(d/2), x=-z=h*sin(d/2)
         for (roll, yaw) in [(0.0, 0.0), (30.0, 0.0), (0.0, 30.0), (45.0, 45.0), (170.0, -20.0)] {
             let q = euler_to_quat([roll, 90.0, yaw]);
-            let half = (roll - yaw as f32).to_radians() * 0.5;
+            let half = (roll - yaw).to_radians() * 0.5;
             assert!(q.iter().all(|v| v.is_finite()));
             assert!((unit_norm(q) - 1.0).abs() < EPS, "norm {}", unit_norm(q));
             assert!(close(q, [h * half.cos(), h * half.sin(), h * half.cos(), -h * half.sin()]), "{q:?}");
@@ -383,7 +383,7 @@ mod tests {
         // at -90 pitch the surviving angle is (roll + yaw); expect w=-y=h*cos(s/2), x=z=h*sin(s/2)
         for (roll, yaw) in [(0.0, 0.0), (30.0, 0.0), (0.0, 30.0), (45.0, 45.0), (170.0, -20.0)] {
             let q = euler_to_quat([roll, -90.0, yaw]);
-            let half = (roll + yaw as f32).to_radians() * 0.5;
+            let half = (roll + yaw).to_radians() * 0.5;
             assert!(q.iter().all(|v| v.is_finite()));
             assert!((unit_norm(q) - 1.0).abs() < EPS, "norm {}", unit_norm(q));
             assert!(close(q, [h * half.cos(), h * half.sin(), -h * half.cos(), h * half.sin()]), "{q:?}");
