@@ -28,8 +28,8 @@
   function feed(frames: TelemetryFrame[]) {
     const now = performance.now();
     for (const f of frames) {
-      scene?.pushFrame(f);
-      stats.update(f, now);
+      const resolved = stats.update(f, now);
+      scene?.pushFrame(resolved);
     }
   }
 

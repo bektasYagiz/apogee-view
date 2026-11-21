@@ -152,6 +152,77 @@ describe("TelemetryStats", () => {
     expect(s.snapshot(2500).rateHz).toBe(0);
   });
 
+  describe("phase inference for UNKNOWN state", () => {
+    const unk = (ts: number, alt: number) => frame(ts, alt, { state: "UNKNOWN" });
+
+    it("resolves UNKNOWN to IDLE while sitting on the pad", () => {
+      const s = new TelemetryStats();
+      for (let i = 0; i < 10; i++) {
+        expect(s.update(unk(i * 100, 850), i).state).toBe("IDLE");
+      }
+      expect(s.snapshot(10).state).toBe("IDLE");
+    });
+
+    it("passes through states the sender provided", () => {
+      const s = new TelemetryStats();
+      const f = frame(0, 0, { state: "BOOST" });
+      expect(s.update(f, 0)).toBe(f);
+      expect(s.snapshot(0).state).toBe("BOOST");
+    });
+
+    it("switches to FLIGHT once AGL passes 2 m", () => {
+      const s = new TelemetryStats();
+      s.update(unk(0, 100), 0);
+      expect(s.update(unk(1000, 101.9), 1).state).toBe("IDLE");
+      expect(s.update(unk(2000, 102.1), 2).state).toBe("FLIGHT");
+    });
+
+    it("switches to FLIGHT on vertical speed alone while still under 2 m", () => {
+      const s = new TelemetryStats();
+      s.update(unk(0, 100), 0);
+      // 0.8 m in 100 ms: raw 8 m/s, smoothed 2.8 m/s
+      const f = s.update(unk(100, 100.8), 1);
+      expect(f.state).toBe("FLIGHT");
+      expect(s.snapshot(1).agl).toBeLessThan(2);
+    });
+
+    it("returns to IDLE only after touchdown stays still for a second", () => {
+      const s = new TelemetryStats();
+      let ts = 0;
+      const step = (alt: number) => s.update(unk((ts += 100), alt), ts);
+
+      for (let i = 0; i < 3; i++) step(0);
+      for (let i = 1; i <= 10; i++) step(i * 0.5);
+      expect(step(5).state).toBe("FLIGHT");
+
+      // touchdown: the smoothed speed decays, then must hold below 0.5 m/s for 1 s
+      let settleTs: number | null = null;
+      let idleTs: number | null = null;
+      let first = true;
+      for (let i = 0; i < 60 && idleTs === null; i++) {
+        const state = step(0).state;
+        if (first) {
+          expect(state).toBe("FLIGHT");
+          first = false;
+        }
+        const snap = s.snapshot(ts);
+        if (settleTs === null && Math.abs(snap.vSpeed) < 0.5 && snap.agl < 2) settleTs = ts;
+        if (state === "IDLE") idleTs = ts;
+      }
+      expect(settleTs).not.toBeNull();
+      expect(idleTs).not.toBeNull();
+      expect(idleTs! - settleTs!).toBeGreaterThanOrEqual(1000);
+    });
+
+    it("reset puts the inference back to IDLE", () => {
+      const s = new TelemetryStats();
+      s.update(unk(0, 0), 0);
+      expect(s.update(unk(1000, 50), 1).state).toBe("FLIGHT");
+      s.reset();
+      expect(s.update(unk(2000, 700), 2).state).toBe("IDLE");
+    });
+  });
+
   it("reset clears the baseline, apogee and derivatives", () => {
     const s = new TelemetryStats();
     s.update(frame(0, 100), 0);
