@@ -63,6 +63,9 @@ export class FlightScene {
   private mode: CameraMode = "chase";
   private readonly resizeObserver: ResizeObserver;
   private readonly targetPos = new Vector3(0, REST_HEIGHT, 0);
+  private phase = "UNKNOWN";
+  private trailArmed = false;
+  private rebuilding = true;
   // vertical nose-up on the pad until the first frame arrives
   private readonly targetQuat = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), Math.PI / 2);
   private rafId = 0;
@@ -137,19 +140,28 @@ export class FlightScene {
     if (!enu || !frame.quat.every(Number.isFinite)) return;
     this.targetPos.set(enu.x, enu.y + REST_HEIGHT, enu.z);
     this.targetQuat.copy(nedQuatToThree(frame.quat));
-    this.trail.push(this.targetPos, frame.state);
+    this.phase = frame.state;
+    // History after a reset or rewind arrives as a burst the damped rocket can't trace, so it goes straight in.
+    if (this.rebuilding) this.trail.push(this.targetPos, frame.state);
+    this.trailArmed = true;
   }
 
   resetOrigin(): void {
     this.projector.resetOrigin();
-    this.trail.clear();
+    this.restartTrail();
     this.terrain.reset();
     this.conformScaleRing();
   }
 
   /** Drops trail history but keeps the locked origin and terrain; used when rewinding a replay. */
   clearTrail(): void {
+    this.restartTrail();
+  }
+
+  private restartTrail(): void {
     this.trail.clear();
+    this.trailArmed = false;
+    this.rebuilding = true;
   }
 
   getGroundHeight(x: number, z: number): number {
@@ -283,8 +295,16 @@ export class FlightScene {
     const dt = this.lastTime ? Math.min((now - this.lastTime) / 1000, 0.1) : 0;
     this.lastTime = now;
 
-    this.rocket.position.lerp(this.targetPos, 1 - Math.exp(-POS_RATE * dt));
-    this.rocket.quaternion.slerp(this.targetQuat, 1 - Math.exp(-ATT_RATE * dt));
+    if (this.rebuilding && this.trailArmed) {
+      this.rocket.position.copy(this.targetPos);
+      this.rocket.quaternion.copy(this.targetQuat);
+      this.rebuilding = false;
+    } else {
+      this.rocket.position.lerp(this.targetPos, 1 - Math.exp(-POS_RATE * dt));
+      this.rocket.quaternion.slerp(this.targetQuat, 1 - Math.exp(-ATT_RATE * dt));
+    }
+    // trail follows the rendered CG so it never runs ahead of the airframe
+    if (this.trailArmed) this.trail.push(this.rocket.position, this.phase);
 
     this.updateDropLine();
     this.updateCamera();
