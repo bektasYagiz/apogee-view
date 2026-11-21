@@ -16,6 +16,7 @@ import {
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
+  Matrix4,
   PerspectiveCamera,
   Quaternion,
   RingGeometry,
@@ -43,9 +44,16 @@ const NOSE_AXIS = new Vector3(0, 0, -1);
 const PAD_CAM_POS =new Vector3(12, 3, 12);
 const TOPDOWN_HEIGHT = 60;
 const CG_LOOK_OFFSET = new Vector3(0, 0.8, 0);
-// body-mounted camera: just off the airframe, forward of mid, looking aft along the fins
-const ONBOARD_POS = new Vector3(0.1, 0, -0.3);
-const ONBOARD_LOOK = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), Math.PI);
+const NEAR_PLANE = 0.1;
+const ONBOARD_NEAR_PLANE = 0.05;
+// Pod just below the nose shoulder, in rocket-local space (nose is -Z, aft is +Z, CG at the origin).
+// Airframe from rocketMesh: body radius 0.06 m, nose base at z = -0.465, nozzle at z = +0.815.
+const BODY_RADIUS = 0.06;
+const ONBOARD_POS = new Vector3(BODY_RADIUS + 0.18, 0, -0.365);
+// Looks down the airframe past the fins toward the tail and the ground below.
+const ONBOARD_LOOK = new Quaternion().setFromRotationMatrix(
+  new Matrix4().lookAt(ONBOARD_POS, new Vector3(0, 0, 1.4), new Vector3(0, 1, 0)),
+);
 
 export class FlightScene {
   private readonly renderer: WebGLRenderer;
@@ -87,7 +95,7 @@ export class FlightScene {
     container.appendChild(this.renderer.domElement);
 
     this.scene.background = new Color(BG_HEX);
-    this.camera = new PerspectiveCamera(55, 1, 0.1, 20000);
+    this.camera = new PerspectiveCamera(55, 1, NEAR_PLANE, 20000);
     this.camera.position.set(4, 2.5, 5);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -182,6 +190,9 @@ export class FlightScene {
     }
     this.mode = mode;
     this.camera.up.set(0, 1, 0);
+    // tighter near plane only on the pod camera so far-field depth precision stays intact elsewhere
+    this.camera.near = mode === "onboard" ? ONBOARD_NEAR_PLANE : NEAR_PLANE;
+    this.camera.updateProjectionMatrix();
     this.controls.enabled = mode === "chase";
     if (mode === "chase") {
       this.controls.target.copy(this.rocket.position).add(CG_LOOK_OFFSET);
