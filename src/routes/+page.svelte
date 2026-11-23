@@ -129,7 +129,8 @@
   });
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<!-- OrbitControls only blocks the native menu while it is enabled; the other camera modes need this too -->
+<svelte:window onkeydown={onKeydown} oncontextmenu={(e) => e.preventDefault()} />
 
 <div bind:this={container} class="viewport"></div>
 
