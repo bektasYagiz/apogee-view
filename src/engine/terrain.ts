@@ -3,7 +3,8 @@ import { metersPerDegree } from "./coordinates";
 import { TopoContourMaterial } from "./TopoContourMaterial";
 
 const SIZE = 4000;
-const SEGMENTS = 160;
+// 12.5 m between vertices: at or below the DEM's native pixel size (~10-19 m at zoom 13), so no relief is undersampled
+const SEGMENTS = 320;
 const VERTS = SEGMENTS + 1;
 const HALF = SIZE / 2;
 const STEP = SIZE / SEGMENTS;
@@ -27,19 +28,58 @@ const TILES = 2 ** ZOOM;
 const tileX = (lon: number) => ((lon + 180) / 360) * TILES;
 const tileY = (lat: number) => ((1 - Math.asinh(Math.tan((lat * Math.PI) / 180)) / Math.PI) / 2) * TILES;
 
-/** Bilinear sample of a row-major grid at fractional cell coords, clamped to the edges. */
-function bilerp(grid: Float32Array, w: number, h: number, fx: number, fy: number): number {
+/** Catmull-Rom weights for the four taps around a fractional position t in [0, 1). */
+function catmullRom(t: number, out: Float64Array): void {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  out[0] = -0.5 * t3 + t2 - 0.5 * t;
+  out[1] = 1.5 * t3 - 2.5 * t2 + 1;
+  out[2] = -1.5 * t3 + 2 * t2 + 0.5 * t;
+  out[3] = 0.5 * t3 - 0.5 * t2;
+}
+
+const wx = new Float64Array(4);
+const wy = new Float64Array(4);
+
+/**
+ * Bicubic (Catmull-Rom) sample of a row-major grid at fractional cell coords, edges clamped.
+ * Continuous in value and slope, so DEM texel boundaries don't show up as creases in the shading.
+ */
+function bicubic(grid: Float32Array, w: number, h: number, fx: number, fy: number): number {
   const x = Math.min(Math.max(fx, 0), w - 1);
   const y = Math.min(Math.max(fy, 0), h - 1);
   const x0 = Math.floor(x);
   const y0 = Math.floor(y);
-  const x1 = Math.min(x0 + 1, w - 1);
-  const y1 = Math.min(y0 + 1, h - 1);
-  const tx = x - x0;
-  const ty = y - y0;
-  const top = grid[y0 * w + x0] * (1 - tx) + grid[y0 * w + x1] * tx;
-  const bot = grid[y1 * w + x0] * (1 - tx) + grid[y1 * w + x1] * tx;
-  return top * (1 - ty) + bot * ty;
+  catmullRom(x - x0, wx);
+  catmullRom(y - y0, wy);
+  let sum = 0;
+  for (let j = 0; j < 4; j++) {
+    const row = Math.min(Math.max(y0 - 1 + j, 0), h - 1) * w;
+    let rowSum = 0;
+    for (let i = 0; i < 4; i++) rowSum += grid[row + Math.min(Math.max(x0 - 1 + i, 0), w - 1)] * wx[i];
+    sum += rowSum * wy[j];
+  }
+  return sum;
+}
+
+/**
+ * One [1 2 1]/4 pass in each direction. Source DEMs are often quantized to whole metres, which
+ * turns gentle slopes into terraces that light up as stripes once normals are derived from them.
+ */
+function smoothGrid(grid: Float32Array, size: number): void {
+  const tmp = new Float32Array(grid.length);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      tmp[i] = 0.25 * grid[i - (x > 0 ? 1 : 0)] + 0.5 * grid[i] + 0.25 * grid[i + (x < size - 1 ? 1 : 0)];
+    }
+  }
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      grid[i] = 0.25 * tmp[i - (y > 0 ? size : 0)] + 0.5 * tmp[i] + 0.25 * tmp[i + (y < size - 1 ? size : 0)];
+    }
+  }
 }
 
 async function fetchTileElevations(fetchTile: TileFetcher, x: number, y: number): Promise<Float32Array> {
@@ -81,9 +121,10 @@ async function fetchMosaic(lat: number, lon: number, fetchTile: TileFetcher) {
     }
   }
   await Promise.all(jobs);
-  // pixel centres sit at +0.5, hence the shift before bilinear lookup
+  smoothGrid(mosaic, MOSAIC_PX);
+  // pixel centres sit at +0.5, hence the shift before the lookup
   return (la: number, lo: number) =>
-    bilerp(mosaic, MOSAIC_PX, MOSAIC_PX, (tileX(lo) - tx0) * TILE_PX - 0.5, (tileY(la) - ty0) * TILE_PX - 0.5);
+    bicubic(mosaic, MOSAIC_PX, MOSAIC_PX, (tileX(lo) - tx0) * TILE_PX - 0.5, (tileY(la) - ty0) * TILE_PX - 0.5);
 }
 
 export class TerrainMesh {
@@ -102,9 +143,24 @@ export class TerrainMesh {
     this.mesh = new Mesh(geo, new TopoContourMaterial(HALF * 0.3, HALF * 0.98, bgHex, sunDir));
   }
 
-  /** Ground height (m, relative to the origin's ground) at local ENU (x, z). */
+  /**
+   * Ground height (m, relative to the origin's ground) at local ENU (x, z), interpolated over the
+   * same two triangles per cell that the mesh is drawn with, so it matches the rendered surface exactly.
+   */
   sampleHeight(x: number, z: number): number {
-    return bilerp(this.heights, VERTS, VERTS, (x + HALF) / STEP, (z + HALF) / STEP);
+    const gx = Math.min(Math.max((x + HALF) / STEP, 0), SEGMENTS);
+    const gz = Math.min(Math.max((z + HALF) / STEP, 0), SEGMENTS);
+    const ix = Math.min(Math.floor(gx), SEGMENTS - 1);
+    const iz = Math.min(Math.floor(gz), SEGMENTS - 1);
+    const tx = gx - ix;
+    const tz = gz - iz;
+    const h = this.heights;
+    const a = h[iz * VERTS + ix];
+    const b = h[(iz + 1) * VERTS + ix];
+    const c = h[(iz + 1) * VERTS + ix + 1];
+    const d = h[iz * VERTS + ix + 1];
+    // PlaneGeometry splits each cell along b-d into triangles (a, b, d) and (b, c, d)
+    return tx + tz <= 1 ? a + tx * (d - a) + tz * (b - a) : c + (1 - tx) * (b - c) + (1 - tz) * (d - c);
   }
 
   /** Resolves true once DEM relief is applied; false on any failure (terrain stays flat). */
@@ -147,12 +203,31 @@ export class TerrainMesh {
     this.mesh.material.dispose();
   }
 
+  /** Central-difference normals straight from the height grid: symmetric, with no triangle-direction bias. */
+  private updateNormals(): void {
+    const normals = this.mesh.geometry.attributes.normal;
+    const h = this.heights;
+    for (let iz = 0; iz < VERTS; iz++) {
+      const zl = Math.max(iz - 1, 0);
+      const zh = Math.min(iz + 1, VERTS - 1);
+      for (let ix = 0; ix < VERTS; ix++) {
+        const xl = Math.max(ix - 1, 0);
+        const xh = Math.min(ix + 1, VERTS - 1);
+        const dhdx = (h[iz * VERTS + xh] - h[iz * VERTS + xl]) / ((xh - xl) * STEP);
+        const dhdz = (h[zh * VERTS + ix] - h[zl * VERTS + ix]) / ((zh - zl) * STEP);
+        const inv = 1 / Math.hypot(dhdx, 1, dhdz);
+        normals.setXYZ(iz * VERTS + ix, -dhdx * inv, inv, -dhdz * inv);
+      }
+    }
+    normals.needsUpdate = true;
+  }
+
   private apply(baseElevation: number): void {
     const geo = this.mesh.geometry;
     const pos = geo.attributes.position;
     for (let i = 0; i < this.heights.length; i++) pos.setY(i, this.heights[i]);
     pos.needsUpdate = true;
-    geo.computeVertexNormals();
+    this.updateNormals();
     geo.computeBoundingSphere();
     geo.computeBoundingBox();
     this.mesh.material.baseElevation = baseElevation;
