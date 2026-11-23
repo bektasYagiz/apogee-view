@@ -42,7 +42,8 @@ const ATT_RATE = 14;
 const LYING_CLEARANCE = 0.08;
 const NOSE_AXIS = new Vector3(0, 0, -1);
 const PAD_CAM_POS =new Vector3(12, 3, 12);
-const TOPDOWN_HEIGHT = 60;
+// A few centimetres south of straight overhead: OrbitControls can't sit exactly on the pole, and this keeps North (-Z) up on screen.
+const TOPDOWN_OFFSET = new Vector3(0, 60, 0.06);
 const CG_LOOK_OFFSET = new Vector3(0, 0.8, 0);
 const NEAR_PLANE = 0.1;
 const ONBOARD_NEAR_PLANE = 0.05;
@@ -100,6 +101,10 @@ export class FlightScene {
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
+    this.controls.enablePan = false;
+    // pan across the ground plane instead of sliding along the view, which would climb or sink in tilted views
+    this.controls.screenSpacePanning = false;
+    this.controls.panSpeed = 1.4;
     this.controls.target.set(0, 0.8, 0);
     this.controls.minDistance = 0.5;
     this.controls.maxDistance = 5000;
@@ -201,12 +206,24 @@ export class FlightScene {
     // tighter near plane only on the pod camera so far-field depth precision stays intact elsewhere
     this.camera.near = mode === "onboard" ? ONBOARD_NEAR_PLANE : NEAR_PLANE;
     this.camera.updateProjectionMatrix();
-    this.controls.enabled = mode === "chase";
-    if (mode === "chase") {
-      this.controls.target.copy(this.rocket.position).add(CG_LOOK_OFFSET);
-      this.camera.position.copy(this.controls.target).add(this.chaseOffset);
-      this.controls.update();
+    this.controls.enabled = mode !== "onboard";
+    // Chase re-centres the target on the rocket every frame, so a pan would only fight it and jitter.
+    this.controls.enablePan = mode === "pad" || mode === "topdown";
+    switch (mode) {
+      case "chase":
+        this.controls.target.copy(this.rocket.position).add(CG_LOOK_OFFSET);
+        this.camera.position.copy(this.controls.target).add(this.chaseOffset);
+        break;
+      case "pad":
+        this.controls.target.copy(this.rocket.position);
+        this.camera.position.copy(PAD_CAM_POS);
+        break;
+      case "topdown":
+        this.controls.target.copy(this.rocket.position);
+        this.camera.position.copy(this.rocket.position).add(TOPDOWN_OFFSET);
+        break;
     }
+    if (mode !== "onboard") this.controls.update();
   }
 
   dispose(): void {
@@ -290,18 +307,14 @@ export class FlightScene {
         this.controls.update();
         break;
       }
+      // free-look: the pose is set once on entering the mode and the controls own it from then on
       case "pad":
-        this.camera.position.copy(PAD_CAM_POS);
-        this.camera.lookAt(p);
+      case "topdown":
+        this.controls.update();
         break;
       case "onboard":
         this.camera.position.copy(ONBOARD_POS).applyQuaternion(this.rocket.quaternion).add(p);
         this.camera.quaternion.copy(this.rocket.quaternion).multiply(ONBOARD_LOOK);
-        break;
-      case "topdown":
-        this.camera.up.set(0, 0, -1);
-        this.camera.position.set(p.x, p.y + TOPDOWN_HEIGHT, p.z);
-        this.camera.lookAt(p);
         break;
     }
   }
